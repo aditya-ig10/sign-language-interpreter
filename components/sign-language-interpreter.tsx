@@ -144,8 +144,7 @@ export default function SignLanguageInterpreter() {
 
     const gestures = [
       "Hello", "Thank you", "Yes", "No", "Help", "Please", "Sorry",
-      "Good", "Bad", "Name", "What", "Where", "When", "How", "Who",
-      "Fuck Off", 
+      "Good", "Bad", "Name", "What", "Where", "When", "How", "Who", 
     ]
 
     const recognitionInterval = setInterval(() => {
