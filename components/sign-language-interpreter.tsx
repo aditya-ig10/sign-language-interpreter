@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Play, Pause, Download, Copy, Check, RefreshCw, Camera, CameraOff, AlertCircle } from "lucide-react"
 import { useMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
+import * as tmImage from '@teachablemachine/image';
 
 interface Prediction {
   gesture: string
@@ -28,14 +29,61 @@ export default function SignLanguageInterpreter() {
   const [copied, setCopied] = useState(false)
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [isLoadingCamera, setIsLoadingCamera] = useState(false)
+  const [isLoadingModel, setIsLoadingModel] = useState(false)
+  const [model, setModel] = useState<tmImage.CustomMobileNet | null>(null)
+  const modelRef = useRef<tmImage.CustomMobileNet | null>(null)
   const isMobile = useMobile()
   const [isComponentMounted, setIsComponentMounted] = useState(false)
+  const animationFrameId = useRef<number | null>(null)
+  
+  // Replace with your Teachable Machine model URL
+  const MODEL_URL = 'https://teachablemachine.withgoogle.com/models/mg6bOsSD4/';
+  
+  // Confidence threshold for predictions
+  const CONFIDENCE_THRESHOLD = 0.75;
+  // Debounce time to avoid rapid text changes (in ms)
+  const PREDICTION_DEBOUNCE = 500;
+  // Store the last prediction time
+  const lastPredictionTime = useRef<number>(0);
+  // Store last gesture to avoid duplicates
+  const lastGesture = useRef<string>("");
 
   // Set component mounted state
   useEffect(() => {
     setIsComponentMounted(true)
-    return () => setIsComponentMounted(false)
+    return () => {
+      setIsComponentMounted(false)
+      if (animationFrameId.current) {
+        cancelAnimationFrame(animationFrameId.current);
+      }
+    }
   }, [])
+
+  // Load Teachable Machine model
+  const loadModel = useCallback(async () => {
+    if (!isComponentMounted) return;
+    
+    try {
+      setIsLoadingModel(true);
+      
+      // Load the model and metadata
+      const modelURL = MODEL_URL + 'model.json';
+      const metadataURL = MODEL_URL + 'metadata.json';
+      
+      const loadedModel = await tmImage.load(modelURL, metadataURL);
+      setModel(loadedModel);
+      modelRef.current = loadedModel;
+      
+      console.log("Model loaded successfully");
+      setIsLoadingModel(false);
+      return loadedModel;
+    } catch (error) {
+      console.error("Error loading model:", error);
+      setCameraError("Failed to load sign language model. Please refresh the page.");
+      setIsLoadingModel(false);
+      return null;
+    }
+  }, [MODEL_URL, isComponentMounted]);
 
   // Initialize camera
   const initCamera = useCallback(async () => {
@@ -45,10 +93,18 @@ export default function SignLanguageInterpreter() {
     setCameraError(null)
 
     try {
-      // Give a short delay to ensure DOM is ready
+      // Load model if not already loaded
+      let currentModel = modelRef.current;
+      if (!currentModel) {
+        const loaded = await loadModel();
+        currentModel = loaded ?? null;
+        if (!currentModel) {
+          setIsLoadingCamera(false);
+          return;
+        }
+      }
+
       await new Promise(resolve => setTimeout(resolve, 100))
-      
-      // Double check if component is still mounted and video ref exists
       if (!isComponentMounted || !videoRef.current) {
         console.warn("Component not mounted or video element not available")
         setIsLoadingCamera(false)
@@ -65,8 +121,6 @@ export default function SignLanguageInterpreter() {
       }
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints)
-      
-      // Check again if element is still available
       if (!videoRef.current) {
         console.warn("Video element no longer available after getUserMedia")
         stream.getTracks().forEach(track => track.stop())
@@ -76,7 +130,6 @@ export default function SignLanguageInterpreter() {
       }
       
       videoRef.current.srcObject = stream
-      
       videoRef.current.onloadedmetadata = () => {
         if (!videoRef.current) return
         
@@ -94,7 +147,6 @@ export default function SignLanguageInterpreter() {
     } catch (error) {
       console.error("Error accessing camera:", error)
       let errorMessage = "Failed to access camera. Please ensure a camera is available."
-      
       if (error instanceof DOMException) {
         if (error.name === "NotAllowedError") {
           errorMessage = "Camera access denied. Please allow camera permissions."
@@ -102,11 +154,10 @@ export default function SignLanguageInterpreter() {
           errorMessage = "No camera found on this device."
         }
       }
-      
       setCameraError(errorMessage)
       setIsLoadingCamera(false)
     }
-  }, [isComponentMounted])
+  }, [isComponentMounted, loadModel])
 
   // Stop camera
   const stopCamera = useCallback(() => {
@@ -118,6 +169,12 @@ export default function SignLanguageInterpreter() {
     setCameraActive(false)
     setIsRecording(false)
     setCameraError(null)
+    
+    // Clear animation frame
+    if (animationFrameId.current) {
+      cancelAnimationFrame(animationFrameId.current);
+      animationFrameId.current = null;
+    }
   }, [])
 
   // Toggle camera
@@ -133,31 +190,88 @@ export default function SignLanguageInterpreter() {
   const toggleRecording = useCallback(() => {
     if (!cameraActive) return
     setIsRecording((prev) => {
-      if (!prev) setTranslatedText("")
+      if (!prev) {
+        // Starting a new recording session
+        setTranslatedText("")
+        lastGesture.current = "";
+        // Start prediction loop when recording begins
+        if (modelRef.current && videoRef.current) {
+          predictLoop();
+        }
+      } else {
+        // Stopping recording
+        if (animationFrameId.current) {
+          cancelAnimationFrame(animationFrameId.current);
+          animationFrameId.current = null;
+        }
+      }
       return !prev
     })
   }, [cameraActive])
 
-  // Simulate sign language recognition
-  useEffect(() => {
-    if (!isRecording || !cameraActive) return
-
-    const gestures = [
-      "Hello", "Thank you", "Yes", "No", "Help", "Please", "Sorry",
-      "Good", "Bad", "Name", "What", "Where", "When", "How", "Who", 
-    ]
-
-    const recognitionInterval = setInterval(() => {
-      if (Math.random() > 0.3) {
-        const randomGesture = gestures[Math.floor(Math.random() * gestures.length)]
-        const confidence = 0.7 + Math.random() * 0.3
-        setCurrentPrediction({ gesture: randomGesture, confidence })
-        setTranslatedText((prev) => (prev ? `${prev} ${randomGesture}` : randomGesture))
+  // Prediction loop
+  const predictLoop = useCallback(async () => {
+    if (!isRecording || !cameraActive || !modelRef.current || !videoRef.current) return;
+    
+    try {
+      // Make prediction with the model
+      const prediction = await modelRef.current.predict(videoRef.current);
+      
+      // Find the prediction with highest probability
+      let highestProbability = 0;
+      let bestPrediction: Prediction | null = null;
+      
+      for (let i = 0; i < prediction.length; i++) {
+        const { className, probability } = prediction[i];
+        if (probability > highestProbability && probability > CONFIDENCE_THRESHOLD) {
+          highestProbability = probability;
+          bestPrediction = {
+            gesture: className,
+            confidence: probability
+          };
+        }
       }
-    }, 1500)
+      
+      if (bestPrediction) {
+        setCurrentPrediction(bestPrediction);
+        
+        // Update translated text with debouncing to avoid rapid changes
+        const now = Date.now();
+        if (
+          now - lastPredictionTime.current > PREDICTION_DEBOUNCE && 
+          bestPrediction.gesture !== lastGesture.current
+        ) {
+          lastPredictionTime.current = now;
+          lastGesture.current = bestPrediction.gesture;
+          
+          setTranslatedText((prev) => 
+            prev ? `${prev} ${bestPrediction!.gesture}` : bestPrediction!.gesture
+          );
+        }
+      }
+    } catch (error) {
+      console.error("Prediction error:", error);
+    }
+    
+    // Continue the prediction loop
+    if (isRecording && cameraActive) {
+      animationFrameId.current = requestAnimationFrame(predictLoop);
+    }
+  }, [isRecording, cameraActive]);
 
-    return () => clearInterval(recognitionInterval)
-  }, [isRecording, cameraActive])
+  // Start prediction loop when recording begins
+  useEffect(() => {
+    if (isRecording && cameraActive && modelRef.current && videoRef.current) {
+      predictLoop();
+    }
+    
+    return () => {
+      if (animationFrameId.current) {
+        cancelAnimationFrame(animationFrameId.current);
+        animationFrameId.current = null;
+      }
+    };
+  }, [isRecording, cameraActive, predictLoop]);
 
   // Save conversation when recording stops
   useEffect(() => {
@@ -196,6 +310,12 @@ export default function SignLanguageInterpreter() {
     setTranslatedText("")
     setCurrentPrediction(null)
     setIsRecording(false)
+    lastGesture.current = "";
+    
+    if (animationFrameId.current) {
+      cancelAnimationFrame(animationFrameId.current);
+      animationFrameId.current = null;
+    }
   }, [])
 
   // Format timestamp
@@ -218,13 +338,16 @@ export default function SignLanguageInterpreter() {
               muted 
               className={cn(
                 "object-cover w-full h-full",
-                !cameraActive && "hidden" // Hide video when not active
+                !cameraActive && "hidden"
               )} 
             />
             
-            {isLoadingCamera ? (
-              <div className="flex items-center justify-center w-full h-full">
+            {(isLoadingCamera || isLoadingModel) ? (
+              <div className="flex flex-col items-center justify-center w-full h-full">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div>
+                <p className="mt-4 text-slate-400">
+                  {isLoadingModel ? "Loading sign language model..." : "Starting camera..."}
+                </p>
               </div>
             ) : !cameraActive && (
               <div className="flex flex-col items-center justify-center w-full h-full">
@@ -235,7 +358,7 @@ export default function SignLanguageInterpreter() {
             
             {cameraError && (
               <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-75">
-                <div className="text-center text-red-400">
+                <div className="text-center text-red-400 max-w-md p-4">
                   <AlertCircle className="w-8 h-8 mx-auto mb-2" />
                   <p>{cameraError}</p>
                 </div>
@@ -255,7 +378,7 @@ export default function SignLanguageInterpreter() {
             <Button
               onClick={toggleCamera}
               variant="outline"
-              disabled={isLoadingCamera}
+              disabled={isLoadingCamera || isLoadingModel}
               className={cn("flex-1", cameraActive ? "bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700" : "")}
             >
               {cameraActive ? (
@@ -273,7 +396,7 @@ export default function SignLanguageInterpreter() {
 
             <Button
               onClick={toggleRecording}
-              disabled={!cameraActive || isLoadingCamera}
+              disabled={!cameraActive || isLoadingCamera || isLoadingModel}
               variant={isRecording ? "destructive" : "default"}
               className="flex-1"
             >
@@ -312,11 +435,13 @@ export default function SignLanguageInterpreter() {
                     <p className="text-slate-500 dark:text-slate-400 text-center mt-12">
                       {cameraError
                         ? "Resolve camera issues to start"
-                        : cameraActive
-                          ? isRecording
-                            ? "Waiting for sign language gestures..."
-                            : "Press Start to begin interpreting"
-                          : "Turn on camera to start"}
+                        : isLoadingModel
+                          ? "Loading sign language model..."
+                          : cameraActive
+                            ? isRecording
+                              ? "Waiting for sign language gestures..."
+                              : "Press Start to begin interpreting"
+                            : "Turn on camera to start"}
                     </p>
                   )}
                 </div>
