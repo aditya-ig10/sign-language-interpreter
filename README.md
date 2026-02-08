@@ -1,4 +1,4 @@
-# 🤟 SignSense - Sign Language Interpreter
+# Sign Language Interpreter
 
 An AI-powered web application that recognizes sign language gestures in real-time using computer vision and machine learning, helping bridge communication gaps between sign language users and non-users.
 
